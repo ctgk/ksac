@@ -14,7 +14,6 @@ def load_xy(x_path: str, y_path: str, n_classes: int, size=None):
     y = tf.io.read_file(y_path)
     y = tf.image.decode_png(y, channels=1)
     y = tf.where(y >= n_classes, n_classes - 1, y)
-    y = tf.image.convert_image_dtype(y, tf.int64)
     if size is not None:
         x = tf.image.resize(x, size)
         y = tf.image.resize(y, size, method='nearest')
