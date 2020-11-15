@@ -1,4 +1,3 @@
-import argparse
 import glob
 import os
 import typing as tp
@@ -6,8 +5,6 @@ import typing as tp
 import numpy as np
 import tensorflow as tf
 from tqdm import tqdm
-
-from ksac import create_ksac_net, _BACKBONES
 
 
 def load_xy(x_path: str, y_path: str, n_classes: int, size=None):
@@ -51,6 +48,9 @@ def focal_loss(labels, logits, gamma: float = 2.0):
 
 
 if __name__ == '__main__':
+    import argparse
+    from model import create_ksac_net, _BACKBONES
+
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
