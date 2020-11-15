@@ -46,6 +46,55 @@ def focal_loss(labels, logits, gamma: float = 2.0):
         q * lnp * tf.clip_by_value((1 - p), 1e-8, 1) ** gamma, -1)
 
 
+def train_model(
+        model: tf.keras.Model,
+        x_train_dir: str,
+        y_train_dir: str,
+        output_dir: str,
+        epochs: int,
+        batchsize: int,
+        progress_bar: tqdm,
+        description_template='Epoch={:3d}, Acc={:3d}%, Loss={:6.04f}'):
+    input_shape = model.inputs[0].shape
+    n_classes = model.outputs[0].shape[-1]
+    x_train = glob.glob(os.path.join(x_train_dir, '*.jpg'))
+    x_train.sort()
+    y_train = glob.glob(os.path.join(y_train_dir, '*.png'))
+    y_train.sort()
+    assert len(x_train) == len(y_train)
+    x_train, y_train = np.array(x_train), np.array(y_train)
+
+    running_accuracy = 0
+    x, y = load_minibatch(
+        x_train[:batchsize], y_train[:batchsize],
+        n_classes=n_classes, size=input_shape[1:-1])
+    running_loss = np.mean(model.predict(x) == y.numpy())
+    optimizer = tf.optimizers.Adam()
+    for e in range(1, epochs + 1):
+        indices = np.random.permutation(len(x_train))
+        pbar = progress_bar(range(0, len(x_train), batchsize))
+        for i in pbar:
+            x, y = load_minibatch(
+                x_train[indices[i: i + batchsize]],
+                y_train[indices[i: i + batchsize]],
+                n_classes=n_classes, size=input_shape[1:-1])
+            with tf.GradientTape() as tape:
+                logits = model(x, training=True)
+                loss = tf.reduce_mean(focal_loss(y, logits))
+            running_loss = running_loss * 0.99 + loss * 0.01
+            accuracy = np.mean(
+                np.argmax(logits.numpy(), -1) == y_batch.numpy())
+            running_accuracy = running_accuracy * 0.99 + accuracy * 0.01
+            if i % (10 * batchsize) == 0:
+                pbar.set_description(
+                    description_template.format(
+                        e, int(running_accuracy * 100), running_loss))
+            grads = tape.gradient(loss, model.trainable_variables)
+            optimizer.apply_gradients(zip(grads, model.trainable_variables))
+        os.makedirs(output_dir, exist_ok=True)
+        model.save(os.path.join(output_dir, f'epoch_{e:03d}'))
+
+
 if __name__ == '__main__':
     import argparse
     from model import create_ksac_net, _BACKBONES

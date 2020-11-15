@@ -9,7 +9,9 @@ _BACKBONES = {
     'mobilenetv2': {
         'preprocess': tf.keras.applications.mobilenet_v2.preprocess_input,
         'net': tf.keras.applications.MobileNetV2,
+        'x2_layer_name': 'block_1_expand_relu',
         'x4_layer_name': 'block_3_expand_relu',
+        'x8_layer_name': 'block_6_expand_relu',
         'x16_layer_name': 'block_13_expand_relu',
     },
     'xception': {
@@ -34,10 +36,12 @@ class _KSAC33(tf.keras.layers.Layer):
             filters: int,
             dilation_rates: tp.Iterable[int] = (6, 12, 18),
             use_bn: bool = True,
+            separable: bool = True,
             kernel_initializer='glorot_uniform'):
         super().__init__()
         self._filters = filters
         self._dilation_rates = dilation_rates
+        self._separable = separable
         self._kernel_initializer = kernel_initializer
         if use_bn:
             self.bns = [
@@ -45,19 +49,33 @@ class _KSAC33(tf.keras.layers.Layer):
                 for _ in self._dilation_rates]
 
     def build(self, input_shape):
-        k_shape = (3, 3, input_shape[-1], self._filters)
         k_init = eval('tf.keras.initializers.' + self._kernel_initializer)()
-        self.kernel = tf.Variable(
-            k_init(k_shape), trainable=True, name='kernel')
+        if self._separable:
+            d_shape = (3, 3, input_shape[-1], 1)
+            p_shape = (1, 1, input_shape[-1], self._filters)
+            self.depthwise_kernel = tf.Variable(
+                k_init(d_shape), trainable=True, name='depthwise_kernel')
+            self.pointwise_kernel = tf.Variable(
+                k_init(p_shape), trainable=True, name='pointwise_kernel')
+        else:
+            k_shape = (3, 3, input_shape[-1], self._filters)
+            self.kernel = tf.Variable(
+                k_init(k_shape), trainable=True, name='kernel')
         if hasattr(self, 'bns'):
             for bn in self.bns:
                 bn.build(input_shape[:-1] + [self._filters])
 
     def call(self, x, training: bool = False):
-        feature_maps = [
-            tf.nn.conv2d(x, self.kernel, (1, 1), 'SAME', dilations=d)
-            for d in self._dilation_rates
-        ]
+        if self._separable:
+            feature_maps = [
+                tf.nn.separable_conv2d(
+                    x, self.depthwise_kernel, self.pointwise_kernel, [1] * 4,
+                    'SAME', dilations=[d, d])
+                for d in self._dilation_rates]
+        else:
+            feature_maps = [
+                tf.nn.conv2d(x, self.kernel, (1, 1), 'SAME', dilations=d)
+                for d in self._dilation_rates]
         if hasattr(self, 'bns'):
             feature_maps = [
                 bn(h, training=training)
@@ -137,10 +155,20 @@ def deeplabv3_plus_decoder(
     return tf.image.resize(images=h4, size=out_size)
 
 
+def decoder(hr: list, n_classes: int, out_size):
+    h = tf.concat(
+        [hr[0]]
+        + [tf.image.resize(images=h, size=hr[0].shape[1:-1]) for h in hr[1:]],
+        axis=-1)
+    h = tf.keras.layers.Conv2D(n_classes, 3, (1, 1), 'SAME')(h)
+    return tf.image.resize(images=h, size=out_size)
+
+
 def create_ksac_net(
         input_shape: tp.List[int],
         n_classes: int,
-        filters: int,
+        resolutions: tp.List[int] = [2, 4],
+        filters: tp.List[int] = [64, 128],
         dilation_rates: tp.List[int] = [6, 12, 18],
         use_bn: bool = True,
         backbone='mobilenetv2'):
@@ -150,18 +178,19 @@ def create_ksac_net(
         inputs=pretrained.inputs,
         outputs=[
             pretrained.get_layer(
-                _BACKBONES[backbone]['x4_layer_name']).output,
-            pretrained.get_layer(
-                _BACKBONES[backbone]['x16_layer_name']).output,
+                _BACKBONES[backbone][f'x{r}_layer_name']).output
+            for r in resolutions
         ]
     )
     x = tf.keras.Input(input_shape, dtype=tf.float32)
     h = _BACKBONES[backbone]['preprocess'](x)
-    h4, h16 = pretrained(h)
-    h16 = KernelSharingAtrousConvolution(
-        filters=filters, dilation_rates=dilation_rates, use_bn=use_bn)(h16)
-    logits = deeplabv3_plus_decoder(
-            h4, h16, n_classes, filters, input_shape[:-1])
+    hr = pretrained(h)
+    hr = [
+        KernelSharingAtrousConvolution(
+            filters=f, dilation_rates=dilation_rates, use_bn=use_bn)(h)
+        for f, h in zip(filters, hr)
+    ]
+    logits = decoder(hr, n_classes, out_size=input_shape[:-1])
     return tf.keras.Model(inputs=[x], outputs=[logits])
 
 
@@ -174,20 +203,27 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     parser.add_argument(
-        '--input_shape', type=int, nargs=2, default=[480, 480],
+        '--input_shape', type=int, nargs=2, default=[240, 320],
         help='Input image shape')
     parser.add_argument(
         '--n_classes', type=int, default=20, help='Number of classes')
     parser.add_argument(
-        '--filters', type=int, default=128, help='Number of filters')
+        '--dilation_rates', type=int, nargs='*', default=[6, 12, 18],
+        help='Dilation rate for each atrous convolution in KSAC module')
+    parser.add_argument(
+        '--resolutions', type=int, nargs='*', default=[4, 16],
+        help='Resolutions of feature maps from a backbone network')
+    parser.add_argument(
+        '--filters', type=int, nargs='*', default=[32, 64],
+        help='Number of filters of KSAC module for each resolution')
     parser.add_argument(
         '--backbone', type=str, default=list(_BACKBONES)[0],
         choices=list(_BACKBONES), help='Backbone network')
     args = parser.parse_args()
 
     model = create_ksac_net(
-        args.input_shape + [3], args.n_classes, args.filters,
-        backbone=args.backbone)
+        args.input_shape + [3], args.n_classes, args.resolutions, args.filters,
+        args.dilation_rates, backbone=args.backbone)
     concrete = tf.function(lambda inputs: model(inputs))
     concrete_func = concrete.get_concrete_function(
         [tf.TensorSpec([1] + args.input_shape + [3])])
@@ -201,3 +237,4 @@ if __name__ == '__main__':
     print(model.summary())
     print(f'{flops.total_float_ops:,} FLOPs')
     tf.keras.utils.plot_model(model, show_shapes=True)
+    print(model.outputs[0].shape)
