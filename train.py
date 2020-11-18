@@ -19,16 +19,16 @@ def load_xy(
     y = imread(y_path)
     y[y >= n_classes] = n_classes - 1
     if crop_to is not None:
-        h = np.random.randint(0, x.shape[0] - crop_to[0])
-        w = np.random.randint(0, y.shape[1] - crop_to[1])
-        x = x[h: y.shape[0] - h, w: y.shape[1] - w]
-        y = y[h: y.shape[0] - h, w: y.shape[1] - w]
-        assert x.shape[:2] == y.shape == tuple(crop_to)
+        h = np.random.randint(0, x.shape[0] - crop_to[0] + 1)
+        w = np.random.randint(0, y.shape[1] - crop_to[1] + 1)
+        x = x[h: h + crop_to[0], w: w + crop_to[1]]
+        y = y[h: h + crop_to[0], w: w + crop_to[1]]
+        assert x.shape[:2] == y.shape == tuple(crop_to), (x.shape, y.shape)
     if resize_to is not None:
         x = resize(
-            x, resize_to, order=1, preseve_range=True).astype(np.float32)
+            x, resize_to, order=1, preserve_range=True).astype(np.float32)
         y = resize(
-            y, resize_to, order=0, preseve_range=True).astype(np.int)
+            y, resize_to, order=0, preserve_range=True).astype(np.int)
     if np.random.uniform() > 0.5:
         x = x[:, ::-1]
         y = y[:, ::-1]
@@ -89,17 +89,17 @@ def train_model(
         iterator = range(0, len(x_train), batchsize)
         if progress_bar is not None:
             iterator = progress_bar(iterator)
-        for i in pbar:
+        for i in iterator:
             x, y = load_minibatch(
                 x_train[indices[i: i + batchsize]],
                 y_train[indices[i: i + batchsize]],
-                n_classes=n_classes, size=input_shape[1:-1])
+                n_classes=n_classes, crop_to=crop_to,
+                resize_to=input_shape[1:-1])
             with tf.GradientTape() as tape:
                 logits = model(x, training=True)
                 loss = tf.reduce_mean(focal_loss(y, logits))
             running_loss = running_loss * 0.99 + loss * 0.01
-            accuracy = np.mean(
-                np.argmax(logits.numpy(), -1) == y_batch.numpy())
+            accuracy = np.mean(np.argmax(logits.numpy(), -1) == y)
             running_accuracy = running_accuracy * 0.99 + accuracy * 0.01
             if i % (10 * batchsize) == 0 and progress_bar is not None:
                 iterator.set_description(
@@ -151,7 +151,7 @@ if __name__ == '__main__':
 
     model = create_ksac_net(
         args.input_shape + [3], args.n_classes, args.filters,
-        dilation_rates=args.dilations, backbone=args.backbone)
+        dilation=args.dilations, backbone=args.backbone)
     train_model(
         model, args.images, args.labels, args.outputs, args.epochs,
         args.batchsize, crop_to=args.crop_to, progress_bar=tqdm)
